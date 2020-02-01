@@ -140,7 +140,7 @@ public class StubParser {
      *
      * @see #getAllStubAnnotations
      */
-    private Map<String, AnnotationMirror> allStubAnnotations;
+    private Map<String, TypeElement> allStubAnnotations;
 
     /**
      * A list of the fully-qualified names of enum constants and static fields with constant values
@@ -221,26 +221,37 @@ public class StubParser {
     /**
      * All annotations defined in the package (but not those nested within classes in the package).
      * Keys are simple names.
+     *
+     * @param packageElement a package
+     * @return a map from annotation name to TypeElement
      */
-    private Map<String, AnnotationMirror> annosInPackage(PackageElement packageElement) {
+    private Map<String, TypeElement> annosInPackage(PackageElement packageElement) {
         return createImportedAnnotationsMap(
                 ElementFilter.typesIn(packageElement.getEnclosedElements()));
     }
 
-    /** All annotations declared (directly) within a class. Keys are simple names. */
-    private Map<String, AnnotationMirror> annosInType(TypeElement typeElement) {
+    /**
+     * All annotations declared (directly) within a class. Keys are simple names.
+     *
+     * @param typeElement a type
+     * @return a map from annotation name to TypeElement
+     */
+    private Map<String, TypeElement> annosInType(TypeElement typeElement) {
         return createImportedAnnotationsMap(
                 ElementFilter.typesIn(typeElement.getEnclosedElements()));
     }
 
-    private Map<String, AnnotationMirror> createImportedAnnotationsMap(
-            List<TypeElement> typeElements) {
-        Map<String, AnnotationMirror> result = new HashMap<>();
+    /**
+     * All annotations declared within any of the given elements.
+     *
+     * @param typeElements the elements whose annotations to retrieve
+     * @return a map from annotation name to TypeElement
+     */
+    private Map<String, TypeElement> createImportedAnnotationsMap(List<TypeElement> typeElements) {
+        Map<String, TypeElement> result = new HashMap<>();
         for (TypeElement typeElm : typeElements) {
             if (typeElm.getKind() == ElementKind.ANNOTATION_TYPE) {
-                AnnotationMirror anno =
-                        AnnotationBuilder.fromName(elements, typeElm.getQualifiedName());
-                putNoOverride(result, typeElm.getSimpleName().toString(), anno);
+                putNoOverride(result, typeElm.getSimpleName().toString(), typeElm);
             }
         }
         return result;
@@ -273,10 +284,12 @@ public class StubParser {
      * Returns all annotations found in the stub file, as a value for {@link #allStubAnnotations}.
      * Note that this also modifies {@link #importedConstants} and {@link #importedTypes}.
      *
+     * @return a map from simple (unqualified) name to TypeElement, for all annotations found in the
+     *     stub file
      * @see #allStubAnnotations
      */
-    private Map<String, AnnotationMirror> getAllStubAnnotations() {
-        Map<String, AnnotationMirror> result = new HashMap<>();
+    private Map<String, TypeElement> getAllStubAnnotations() {
+        Map<String, TypeElement> result = new HashMap<>();
 
         assert !stubUnit.getCompilationUnits().isEmpty();
         CompilationUnit cu = stubUnit.getCompilationUnits().get(0);
@@ -346,10 +359,10 @@ public class StubParser {
 
                         AnnotationMirror anno = AnnotationBuilder.fromName(elements, imported);
                         if (anno != null) {
-                            Element annoElt = anno.getAnnotationType().asElement();
-                            putNoOverride(result, annoElt.getSimpleName().toString(), anno);
-                            importedTypes.put(
-                                    annoElt.getSimpleName().toString(), (TypeElement) annoElt);
+                            TypeElement annoElt =
+                                    (TypeElement) anno.getAnnotationType().asElement();
+                            putNoOverride(result, annoElt.getSimpleName().toString(), annoElt);
+                            importedTypes.put(annoElt.getSimpleName().toString(), annoElt);
                         } else {
                             stubWarnNotFound("Could not load import: " + imported);
                         }
@@ -362,7 +375,7 @@ public class StubParser {
                     }
                 }
             } catch (AssertionError error) {
-                stubWarnNotFound("" + error);
+                stubWarnNotFound(error.toString());
             }
         }
         return result;
@@ -1127,7 +1140,7 @@ public class StubParser {
      * {@code elt} is a field declaration, the type annotation will be ignored.
      *
      * @param elt the element to be annotated
-     * @param a set of annotations that may be applicable to elt
+     * @param annotations set of annotations that may be applicable to elt
      */
     private void recordDeclAnnotation(Element elt, List<AnnotationExpr> annotations) {
         if (annotations == null) {
@@ -1527,26 +1540,32 @@ public class StubParser {
     /**
      * Convert {@code annotation} into an AnnotationMirror. Returns null if the annotation isn't
      * supported by the checker or if some error occurred while converting it.
+     *
+     * @param annotation syntax tree for an annotation
+     * @param allStubAnnotations map from simple nawe to annotation definition
+     * @return the AnnotationMirror for the annotation
      */
     private AnnotationMirror getAnnotation(
-            AnnotationExpr annotation, Map<String, AnnotationMirror> allStubAnnotations) {
+            AnnotationExpr annotation, Map<String, TypeElement> allStubAnnotations) {
         String annoName = annotation.getNameAsString();
-        AnnotationMirror annoMirror = allStubAnnotations.get(annoName);
-        if (annoMirror == null) {
+        TypeElement annoTypeElm = allStubAnnotations.get(annoName);
+        if (annoTypeElm == null) {
             // Not a supported qualifier -> ignore
             return null;
         }
+        annoName = annoTypeElm.getQualifiedName().toString();
+
         if (annotation instanceof MarkerAnnotationExpr) {
-            return annoMirror;
+            return AnnotationBuilder.fromName(elements, annoName);
         } else if (annotation instanceof NormalAnnotationExpr) {
             NormalAnnotationExpr nrmanno = (NormalAnnotationExpr) annotation;
-            AnnotationBuilder builder = new AnnotationBuilder(processingEnv, annoMirror);
+            AnnotationBuilder builder = new AnnotationBuilder(processingEnv, annoName);
             List<MemberValuePair> pairs = nrmanno.getPairs();
             if (pairs != null) {
                 for (MemberValuePair mvp : pairs) {
                     String member = mvp.getNameAsString();
                     Expression exp = mvp.getValue();
-                    boolean success = handleExpr(builder, member, exp);
+                    boolean success = builderAddElement(builder, member, exp);
                     if (!success) {
                         stubWarn(
                                 "Annotation expression, %s, could not be processed for annotation: %s. ",
@@ -1558,9 +1577,9 @@ public class StubParser {
             return builder.build();
         } else if (annotation instanceof SingleMemberAnnotationExpr) {
             SingleMemberAnnotationExpr sglanno = (SingleMemberAnnotationExpr) annotation;
-            AnnotationBuilder builder = new AnnotationBuilder(processingEnv, annoMirror);
+            AnnotationBuilder builder = new AnnotationBuilder(processingEnv, annoName);
             Expression valexpr = sglanno.getMemberValue();
-            boolean success = handleExpr(builder, "value", valexpr);
+            boolean success = builderAddElement(builder, "value", valexpr);
             if (!success) {
                 stubWarn(
                         "Annotation expression, %s, could not be processed for annotation: %s. ",
@@ -1692,7 +1711,7 @@ public class StubParser {
      * {@code @Anno(1)}
      *
      * To properly build @Anno, the IntegerLiteralExpr "1" must be converted from an int to a long.
-     * */
+     */
     private Object convert(Number number, TypeKind expectedKind) {
         return convert(number, expectedKind, false);
     }
@@ -1718,8 +1737,14 @@ public class StubParser {
             case LONG:
                 return number.longValue() * scalefactor;
             case CHAR:
-                /* char is not multiplied by the scale factor since it's not possible for `number` to be negative
-                when `expectedkind` is a CHAR and casting a negative value to char is illegal */
+                // It's not possible for `number` to be negative when `expectedkind` is a CHAR, and
+                // casting a negative value to char is illegal.
+                if (negate) {
+                    throw new BugInCF(
+                            String.format(
+                                    "convert(%s, %s, %s): can't negate a char",
+                                    number, expectedKind, negate));
+                }
                 return (char) number.intValue();
             case FLOAT:
                 return number.floatValue() * scalefactor;
@@ -1733,9 +1758,12 @@ public class StubParser {
     /**
      * Adds an annotation element (argument) to {@code builder}. The element is a Java expression.
      *
+     * @param builder the builder to side-effect
+     * @param name the element name
+     * @param expr the element value
      * @return true if the expression was parsed and added to {@code builder}, false otherwise
      */
-    private boolean handleExpr(AnnotationBuilder builder, String name, Expression expr) {
+    private boolean builderAddElement(AnnotationBuilder builder, String name, Expression expr) {
         ExecutableElement var = builder.findElement(name);
         TypeMirror expected = var.getReturnType();
         TypeKind valueKind;
@@ -1783,6 +1811,10 @@ public class StubParser {
     /**
      * Cast to non-array values so that correct the correct AnnotationBuilder#setValue method is
      * called. (Different types of values are handled differently.)
+     *
+     * @param builder the builder to side-effect
+     * @param name the element name
+     * @param value the element value
      */
     private void builderSetValue(AnnotationBuilder builder, String name, Object value) {
         if (value instanceof Boolean) {
